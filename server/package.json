@@ -1,0 +1,13 @@
+{
+  "name": "personal-cloud-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "TCP backend for Personal Cloud File Manager",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "pg": "^8.16.3"
+  }
+}

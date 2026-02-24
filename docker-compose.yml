@@ -1,0 +1,36 @@
+services:
+  server:
+    build:
+      context: ./server
+    env_file:
+      - .env
+    environment:
+      - PORT=${SERVER_PORT:-4000}
+      - UPLOAD_DIR=/app/uploads
+    ports:
+      - "${SERVER_PORT:-4000}:4000"
+    volumes:
+      - cloud_data:/app/uploads
+    networks:
+      - cloud_net
+
+  client:
+    build:
+      context: ./client
+    env_file:
+      - .env
+    environment:
+      - SERVER_HOST=server
+      - SERVER_PORT=${SERVER_PORT:-4000}
+    depends_on:
+      - server
+    stdin_open: true
+    tty: true
+    networks:
+      - cloud_net
+
+networks:
+  cloud_net:
+
+volumes:
+  cloud_data:
