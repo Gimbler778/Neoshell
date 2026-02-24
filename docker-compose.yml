@@ -1,7 +1,17 @@
 services:
+  init-permissions:
+    image: alpine:3.20
+    user: "0:0"
+    command: ["sh", "-c", "mkdir -p /app/uploads && chown -R 65532:65532 /app/uploads"]
+    volumes:
+      - cloud_data:/app/uploads
+    networks:
+      - cloud_net
+
   server:
     build:
       context: ./server
+    user: "65532:65532"
     env_file:
       - .env
     environment:
@@ -11,6 +21,8 @@ services:
       - "${SERVER_PORT:-4000}:4000"
     volumes:
       - cloud_data:/app/uploads
+    depends_on:
+      - init-permissions
     networks:
       - cloud_net
 
