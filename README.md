@@ -1,4 +1,4 @@
-# Personal Cloud File Manager (Advanced)
+# Personal Cloud File Manager 
 
 Polyglot, Docker-first file manager with a custom TCP protocol:
 
