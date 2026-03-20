@@ -7,6 +7,8 @@ const { Pool } = require('pg');
 const PORT = Number(process.env.PORT || 4000);
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), 'uploads');
 const DATABASE_URL = process.env.NEON_DATABASE_URL;
+const AUTH_TOKEN = process.env.AUTH_TOKEN || '';
+const DB_SSL = String(process.env.DB_SSL || '').toLowerCase();
 
 if (!DATABASE_URL) {
   console.error('Missing NEON_DATABASE_URL in environment.');
@@ -15,10 +17,20 @@ if (!DATABASE_URL) {
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-const pool = new Pool({
+const shouldUseSsl =
+  DB_SSL === 'true' ||
+  DB_SSL === '1' ||
+  /sslmode=require/i.test(DATABASE_URL);
+
+const poolConfig = {
   connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
+};
+
+if (shouldUseSsl) {
+  poolConfig.ssl = { rejectUnauthorized: false };
+}
+
+const pool = new Pool(poolConfig);
 
 async function initDb() {
   await pool.query(`
@@ -46,6 +58,17 @@ function sanitizeFilename(input) {
   const name = path.basename(input || '');
   if (!name || name === '.' || name === '..') return null;
   return name;
+}
+
+function authorizeArgs(args) {
+  if (!AUTH_TOKEN) return { ok: true, args };
+
+  const [providedToken, ...rest] = args;
+  if (!providedToken || providedToken !== AUTH_TOKEN) {
+    return { ok: false, error: 'Unauthorized.' };
+  }
+
+  return { ok: true, args: rest };
 }
 
 async function handleList(socket) {
@@ -212,14 +235,20 @@ async function startServer() {
           const header = lineBuffer.subarray(0, newlineIndex).toString('utf8');
           const rest = lineBuffer.subarray(newlineIndex + 1);
           const { command, args } = parseHeader(header);
+          const auth = authorizeArgs(args);
+
+          if (!auth.ok) {
+            sendJsonLine(socket, { ok: false, error: auth.error });
+            return;
+          }
 
           try {
             if (command === 'LIST') {
               await handleList(socket);
             } else if (command === 'DELETE') {
-              await handleDelete(socket, args[0]);
+              await handleDelete(socket, auth.args[0]);
             } else if (command === 'SEND') {
-              sendState = createSendHandler(socket, args, rest);
+              sendState = createSendHandler(socket, auth.args, rest);
             } else {
               sendJsonLine(socket, { ok: false, error: `Unknown command: ${command}` });
             }

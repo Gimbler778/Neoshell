@@ -19,6 +19,10 @@ def get_server_config(host: Optional[str], port: Optional[int]) -> tuple[str, in
     return resolved_host, resolved_port
 
 
+def get_auth_token(token: Optional[str]) -> Optional[str]:
+    return token if token is not None else os.getenv("AUTH_TOKEN")
+
+
 def _recv_line(sock: socket.socket) -> str:
     data = bytearray()
     while True:
@@ -41,8 +45,13 @@ def send_command(
     payload: bytes = b"",
     host: Optional[str] = None,
     port: Optional[int] = None,
+    token: Optional[str] = None,
 ) -> dict:
     resolved_host, resolved_port = get_server_config(host, port)
+    if token:
+        parts = command_line.split(" ", 1)
+        command_line = f"{parts[0]} {token}" + (f" {parts[1]}" if len(parts) > 1 else "")
+
     with socket.create_connection((resolved_host, resolved_port), timeout=20) as sock:
         sock.sendall((command_line + "\n").encode("utf-8"))
         if payload:
@@ -73,6 +82,7 @@ def upload(
     file_path: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
     host: Optional[str] = typer.Option(None, "--host", help="Server host"),
     port: Optional[int] = typer.Option(None, "--port", help="Server port"),
+    token: Optional[str] = typer.Option(None, "--token", help="Shared auth token"),
 ):
     size = file_path.stat().st_size
     checksum = file_sha256(file_path)
@@ -83,6 +93,7 @@ def upload(
         payload=payload,
         host=host,
         port=port,
+        token=get_auth_token(token),
     )
     require_ok(response)
     console.print(f"[green]Uploaded:[/green] {file_path.name}")
@@ -92,8 +103,9 @@ def upload(
 def list_files(
     host: Optional[str] = typer.Option(None, "--host", help="Server host"),
     port: Optional[int] = typer.Option(None, "--port", help="Server port"),
+    token: Optional[str] = typer.Option(None, "--token", help="Shared auth token"),
 ):
-    response = send_command("LIST", host=host, port=port)
+    response = send_command("LIST", host=host, port=port, token=get_auth_token(token))
     require_ok(response)
     files = response.get("files", [])
 
@@ -119,8 +131,14 @@ def delete(
     filename: str = typer.Argument(..., help="Remote filename to delete"),
     host: Optional[str] = typer.Option(None, "--host", help="Server host"),
     port: Optional[int] = typer.Option(None, "--port", help="Server port"),
+    token: Optional[str] = typer.Option(None, "--token", help="Shared auth token"),
 ):
-    response = send_command(f"DELETE {filename}", host=host, port=port)
+    response = send_command(
+        f"DELETE {filename}",
+        host=host,
+        port=port,
+        token=get_auth_token(token),
+    )
     require_ok(response)
     console.print(f"[yellow]{response.get('message', 'Deleted')}[/yellow]")
 

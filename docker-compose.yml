@@ -12,15 +12,24 @@ services:
     build:
       context: ./server
     user: "65532:65532"
+    restart: unless-stopped
     env_file:
       - .env
     environment:
       - PORT=${SERVER_PORT:-4000}
       - UPLOAD_DIR=/app/uploads
+      - AUTH_TOKEN=${AUTH_TOKEN:-}
+      - DB_SSL=${DB_SSL:-true}
     ports:
-      - "${SERVER_PORT:-4000}:4000"
+      - "${SERVER_PORT:-4000}:${SERVER_PORT:-4000}"
     volumes:
       - cloud_data:/app/uploads
+    healthcheck:
+      test: ["CMD", "node", "-e", "const net=require('net');const port=Number(process.env.PORT||4000);const socket=net.connect({host:'127.0.0.1',port},()=>{socket.end();process.exit(0)});socket.on('error',()=>process.exit(1));setTimeout(()=>process.exit(1),2000);"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     depends_on:
       - init-permissions
     networks:
@@ -34,6 +43,7 @@ services:
     environment:
       - SERVER_HOST=server
       - SERVER_PORT=${SERVER_PORT:-4000}
+      - AUTH_TOKEN=${AUTH_TOKEN:-}
     depends_on:
       - server
     stdin_open: true

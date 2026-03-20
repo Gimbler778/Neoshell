@@ -38,3 +38,75 @@ jobs:
     - name: Syntax check Node server
       run: |
         node --check server/src/index.js
+
+  integration-smoke:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: personal_cloud
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d personal_cloud"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      SERVER_HOST: 127.0.0.1
+      SERVER_PORT: "4000"
+      AUTH_TOKEN: ci-smoke-token
+      DB_SSL: "false"
+      NEON_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/personal_cloud
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+    - name: Install server dependencies
+      run: |
+        cd server
+        npm install
+    - name: Start server
+      run: |
+        node server/src/index.js > server.log 2>&1 &
+        echo $! > server.pid
+    - name: Wait for server
+      run: |
+        python - <<'PY'
+        import socket
+        import time
+
+        host = "127.0.0.1"
+        port = 4000
+        deadline = time.time() + 30
+
+        while time.time() < deadline:
+            try:
+                with socket.create_connection((host, port), timeout=1):
+                    print("server-ready")
+                    break
+            except OSError:
+                time.sleep(0.5)
+        else:
+            raise SystemExit("Server did not start in time")
+        PY
+    - name: Run smoke test
+      run: |
+        python scripts/smoke_test.py
+    - name: Show server log on failure
+      if: failure()
+      run: |
+        cat server.log
+    - name: Stop server
+      if: always()
+      run: |
+        kill "$(cat server.pid)" || true

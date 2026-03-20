@@ -21,6 +21,12 @@ Commands are UTF-8 and line-based (`\n` terminated):
 - `DELETE <filename>`
 - `SEND <filename> <size_bytes> <sha256_hex>` followed by exactly `<size_bytes>` raw bytes
 
+When `AUTH_TOKEN` is configured, server expects the token immediately after the command:
+
+- `LIST <token>`
+- `DELETE <token> <filename>`
+- `SEND <token> <filename> <size_bytes> <sha256_hex>`
+
 Server response is one JSON line:
 
 ```json
@@ -42,6 +48,10 @@ cp .env.example .env
 ```
 
 2. Fill `NEON_DATABASE_URL` in `.env`.
+
+Optional but recommended: set `AUTH_TOKEN` to a long random value.
+
+`DB_SSL=true` is recommended for managed Postgres providers (like Neon).
 
 3. Build and run server:
 
@@ -71,3 +81,13 @@ python main.py --help
 - Server saves files under `/app/uploads` (mapped to Docker volume `cloud_data`).
 - Metadata table: `file_metadata(name, size_bytes, sha256, stored_path, created_at)`.
 - Filename is sanitized to basename to avoid path traversal.
+
+## Smoke Test
+
+Run a quick end-to-end check (upload/list/delete) against a running server:
+
+```bash
+python scripts/smoke_test.py
+```
+
+The script reads `SERVER_HOST`, `SERVER_PORT`, and optional `AUTH_TOKEN` from environment variables.
