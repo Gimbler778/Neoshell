@@ -121,7 +121,7 @@ pkg install -y python git
 4. Clone repository and install client dependencies:
 
 ```bash
-git clone <YOUR_REPO_URL>
+git clone https://github.com/Gimbler778/Neoshell.git
 cd Neoshell/client
 pip install -r requirements.txt
 ```
