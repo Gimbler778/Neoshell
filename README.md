@@ -1,65 +1,122 @@
-# Personal Cloud File Manager 
+# Neoshell — Personal Cloud File Manager
 
-Polyglot, Docker-first file manager with a custom TCP protocol:
+Neoshell is a self-hosted, polyglot file manager designed to run Docker-first with zero dependency on a cloud VM. It exposes a simple custom TCP protocol and is built from three loosely coupled components:
 
-- Python CLI client (`Typer` + `Rich`)
-- Node.js TCP server (`net` module) with file storage
-- NeonDB PostgreSQL metadata persistence
+- **Client** — a Python CLI built with [`Typer`](https://typer.tiangolo.com/) and [`Rich`](https://rich.readthedocs.io/).
+- **Server** — a Node.js TCP server (built on the `net` module) responsible for file storage and protocol handling.
+- **Metadata store** — NeonDB (managed PostgreSQL) for lightweight persistence.
+
+## Table of Contents
+
+- [Architecture](#architecture)
+- [Protocol](#protocol)
+- [Prerequisites](#prerequisites)
+- [Quick Start](#quick-start)
+- [Usage](#usage)
+- [Deployment](#deployment)
+  - [Deployment Model](#deployment-model)
+  - [Start the Server](#start-the-server)
+  - [Remote Access Strategies](#remote-access-strategies)
+  - [Tailscale (Recommended)](#tailscale-recommended)
+  - [Android Phone Client (Termux)](#android-phone-client-termux)
+- [Local Development](#local-development)
+- [Smoke Test](#smoke-test)
+- [Notes](#notes)
 
 ## Architecture
 
-- `client/`: CLI sends custom protocol commands over raw TCP.
-- `server/`: Handles `LIST`, `DELETE`, and `SEND` commands, stores files, persists metadata.
-- `cloud_data` volume: Durable upload storage across container restarts.
-- NeonDB: External managed Postgres (not containerized).
+| Component | Location | Technology | Responsibility |
+| --- | --- | --- | --- |
+| CLI client | `client/` | Python (Typer + Rich) | Sends custom protocol commands over raw TCP. |
+| TCP server | `server/` | Node.js (`net`) | Handles `LIST`, `DELETE`, and `SEND`; stores files; persists metadata. |
+| Storage | `cloud_data` volume | Docker volume | Durable upload storage across container restarts at `/app/uploads`. |
+| Metadata | NeonDB | Managed PostgreSQL | External, non-containerized persistence for file records. |
 
-## Protocol (Custom over TCP)
+Both application containers are defined in a single `docker-compose.yml`, so the entire stack runs on a single host.
 
-Commands are UTF-8 and line-based (`\n` terminated):
+## Protocol
 
-- `LIST`
-- `DELETE <filename>`
-- `SEND <filename> <size_bytes> <sha256_hex>` followed by exactly `<size_bytes>` raw bytes
+Neoshell uses a line-based, UTF-8 TCP protocol. Commands are terminated by `\n`, and every command produces exactly one JSON line in response.
 
-When `AUTH_TOKEN` is configured, server expects the token immediately after the command:
+### Commands (without authentication)
 
-- `LIST <token>`
-- `DELETE <token> <filename>`
-- `SEND <token> <filename> <size_bytes> <sha256_hex>`
+```
+LIST
+DELETE <filename>
+SEND <filename> <size_bytes> <sha256_hex>
+```
 
-Server response is one JSON line:
+`SEND` is followed immediately by exactly `<size_bytes>` of raw binary payload.
+
+### Commands (with `AUTH_TOKEN` configured)
+
+When an auth token is set, it is appended immediately after the command word:
+
+```
+LIST <token>
+DELETE <token> <filename>
+SEND <token> <filename> <size_bytes> <sha256_hex>
+```
+
+### Responses
+
+Success:
 
 ```json
 {"ok": true, "message": "..."}
 ```
 
-or
+Failure:
 
 ```json
 {"ok": false, "error": "..."}
 ```
 
-## Quick Start
+## Prerequisites
 
-1. Copy env file:
+- **Docker** with the Compose plugin (Docker Desktop on Windows/macOS, Docker Engine + Compose on Linux).
+- A **NeonDB** (or any managed PostgreSQL) database and its connection URL.
+- A valid `.env` file. Copy the template and fill it in:
 
 ```bash
 cp .env.example .env
 ```
 
-2. Fill `NEON_DATABASE_URL` in `.env`.
+The file must contain:
 
-Optional but recommended: set `AUTH_TOKEN` to a long random value.
+| Variable | Purpose |
+| --- | --- |
+| `NEON_DATABASE_URL` | Managed Postgres connection string. |
+| `SERVER_PORT` | TCP port the server listens on (default `4000`). |
+| `AUTH_TOKEN` | Shared secret required by server and client (recommended). Use a long random value. |
+| `DB_SSL` | Set to `true` for managed Postgres providers such as Neon. |
 
-`DB_SSL=true` is recommended for managed Postgres providers (like Neon).
+## Quick Start
 
-3. Build and run server:
+1. Copy and configure the environment file:
+
+```bash
+cp .env.example .env
+```
+
+2. Set a strong random `AUTH_TOKEN` and your `NEON_DATABASE_URL`.
+
+3. Build and start the server:
 
 ```bash
 docker compose up --build -d server
 ```
 
-4. Use client commands via Docker Compose (same machine):
+4. Verify the stack:
+
+```bash
+docker compose ps
+docker compose logs --tail 50 server
+```
+
+## Usage
+
+All client commands can be run through Docker Compose on the same machine as the server:
 
 ```bash
 docker compose run --rm client list
@@ -67,15 +124,23 @@ docker compose run --rm client upload ./sample.txt
 docker compose run --rm client delete sample.txt
 ```
 
-## Deployment Mode (No VM)
+> [!NOTE]
+> Use `--host server` when invoking the client container, or let the compose `client` service default to it. `127.0.0.1` inside a container refers to the container itself, not the server container.
 
-This project can be deployed from your own PC (no cloud VM required):
+## Deployment
 
-- Run the server on your host machine with Docker Compose.
-- Keep data in the `cloud_data` Docker volume.
-- Use Tailscale for remote clients (recommended when ISP uses CGNAT).
+There is no reliance on a free-tier cloud provider. The project is designed to be self-hosted from a personal computer (or any always-on device) using Docker Compose, with connectivity handled by third-party network tools.
 
-### Start Server on Host
+### Deployment Model
+
+- The **server runs on the host machine** via Docker Compose.
+- Files are kept in the persistent `cloud_data` Docker volume.
+- Remote access is provided by either:
+  - **LAN** — clients connect to the host's private IP (e.g. `192.168.1.2`).
+  - **Public internet + port forwarding** — viable only if the ISP provides a public IPv4 address (no CGNAT).
+  - **Tailscale** — a third-party mesh VPN that works even behind CGNAT and is the recommended approach for private remote access.
+
+### Start the Server
 
 ```bash
 docker compose up -d --build server
@@ -83,34 +148,33 @@ docker compose ps
 docker compose logs --tail 50 server
 ```
 
-### Access Model
+### Remote Access Strategies
 
-- `LAN`: clients can use host private IP (example `192.168.1.2`).
-- `Public internet + port forwarding`: only works if your ISP gives public IPv4 (no CGNAT).
-- `Tailscale`: works through CGNAT and is recommended for private remote access.
+| Scenario | Access | Recommendation |
+| --- | --- | --- |
+| Same LAN | Host private IP | Simple, no extra tooling. |
+| Public IPv4 | Forward TCP `4000` on router + allow firewall rule | Only when ISP offers public IPv4. |
+| CGNAT / anywhere | Tailscale | Recommended. |
 
-## Tailscale Deployment (Recommended)
+### Tailscale (Recommended)
 
-Detailed no-VM instructions: `docs/DEPLOYMENT_NO_VM.md`.
+Tailscale gives devices private, end-to-end encrypted connectivity regardless of network topology. For detailed instructions, see [docs/DEPLOYMENT_NO_VM.md](docs/DEPLOYMENT_NO_VM.md).
 
 1. Install and sign in to Tailscale on the server host.
-2. Install and sign in to Tailscale on client devices.
-3. Find server Tailscale IP (example `100.89.208.126`).
-4. Use that IP as `--host` in client commands.
-
-Example:
+2. Install and sign in to Tailscale on each client device.
+3. Note the server's Tailscale IP (e.g. `100.89.208.126`).
+4. Use that IP as `--host` in all client commands:
 
 ```bash
-docker compose run --rm client list --host 100.89.208.126 --port 4000 --token <AUTH_TOKEN>
+docker compose run --rm client list --host <SERVER_TAILSCALE_IP> --port 4000 --token <AUTH_TOKEN>
 ```
 
-## Phone Client (Android + Termux)
+### Android Phone Client (Termux)
 
-The project client is a Python CLI. On Android, use Termux:
+The project client is a Python CLI. On Android, run it inside [Termux](https://termux.com/) and connect the phone to Tailscale:
 
-1. Install Termux and Tailscale app.
-2. Connect Tailscale on phone.
-3. In Termux, install Python and Git:
+1. Install **Termux** and the **Tailscale** app, then sign in to Tailscale on the phone.
+2. Install Python and Git in Termux:
 
 ```bash
 pkg update -y
@@ -118,7 +182,7 @@ pkg upgrade -y
 pkg install -y python git
 ```
 
-4. Clone repository and install client dependencies:
+3. Clone the repository and install client dependencies:
 
 ```bash
 git clone https://github.com/Gimbler778/Neoshell.git
@@ -126,7 +190,7 @@ cd Neoshell/client
 pip install -r requirements.txt
 ```
 
-5. Run commands against server Tailscale IP:
+4. Manage files against the server's Tailscale IP:
 
 ```bash
 python main.py list --host <SERVER_TAILSCALE_IP> --port 4000 --token <AUTH_TOKEN>
@@ -134,29 +198,32 @@ python main.py upload sample.txt --host <SERVER_TAILSCALE_IP> --port 4000 --toke
 python main.py delete sample.txt --host <SERVER_TAILSCALE_IP> --port 4000 --token <AUTH_TOKEN>
 ```
 
-## Local CLI Usage (without Docker)
+## Local Development
 
-From `client/`:
+Run the CLI without Docker from `client/`:
 
 ```bash
 pip install -r requirements.txt
 python main.py --help
 ```
 
-## Notes
-
-- Server saves files under `/app/uploads` (mapped to Docker volume `cloud_data`).
-- Metadata table: `file_metadata(name, size_bytes, sha256, stored_path, created_at)`.
-- Filename is sanitized to basename to avoid path traversal.
-- For `docker compose run --rm client ...`, use `--host server` when targeting the compose service network.
-- `127.0.0.1` inside a client container points to that container itself, not the server container.
-
 ## Smoke Test
 
-Run a quick end-to-end check (upload/list/delete) against a running server:
+Run an end-to-end upload/list/delete check against a running server:
 
 ```bash
 python scripts/smoke_test.py
 ```
 
 The script reads `SERVER_HOST`, `SERVER_PORT`, and optional `AUTH_TOKEN` from environment variables.
+
+## Notes
+
+- Server files live under `/app/uploads`, mapped to the `cloud_data` Docker volume.
+- Metadata is stored in the `file_metadata` table (`name`, `size_bytes`, `sha256`, `stored_path`, `created_at`).
+- Uploaded filenames are reduced to their basename to prevent path traversal.
+- Keep the host awake and Docker running — if the server stops, remote clients cannot connect.
+
+## License
+
+See [LICENSE.txt](LICENSE.txt).
