@@ -60,10 +60,16 @@ SEND <token> <filename> <size_bytes> <sha256_hex>
 
 ### Responses
 
-Success:
+Success (general commands):
 
 ```json
 {"ok": true, "message": "..."}
+```
+
+Success (`LIST`):
+
+```json
+{"ok": true, "files": [{"name": "...", "size_bytes": 123, "sha256": "...", "created_at": "..."}]}
 ```
 
 Failure:
@@ -120,9 +126,12 @@ All client commands can be run through Docker Compose on the same machine as the
 
 ```bash
 docker compose run --rm client list
-docker compose run --rm client upload ./sample.txt
+docker compose run --rm -v "${PWD}/sample.txt:/app/sample.txt" client upload sample.txt
 docker compose run --rm client delete sample.txt
 ```
+
+> [!NOTE]
+> The client container only contains `main.py`, so a file to upload must be passed in via a volume mount (as shown above). Use the in-container path as the argument.
 
 > [!NOTE]
 > Use `--host server` when invoking the client container, or let the compose `client` service default to it. `127.0.0.1` inside a container refers to the container itself, not the server container.
