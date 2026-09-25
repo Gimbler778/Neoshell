@@ -1,83 +1,107 @@
-# No-VM Deployment Guide
+# Cloud Deployment Without a VM
 
-This guide explains how to run the project without renting a cloud VM.
+Neoshell is an HTTP service. It can run on a managed Docker web service while file bytes live in S3-compatible object storage and metadata lives in Neon.
 
-## 1. Prerequisites
+## Recommended free stack
 
-- Docker Desktop (Windows/macOS) or Docker Engine + Compose plugin (Linux)
-- A valid `.env` file with:
-  - `NEON_DATABASE_URL`
-  - `SERVER_PORT=4000`
-  - `AUTH_TOKEN=<strong-random-token>`
-  - `DB_SSL=true`
+- **App:** Koyeb free web service, or Render free web service
+- **Files:** Backblaze B2 S3 API
+- **Database:** Neon PostgreSQL
+- **Alternative files:** Cloudflare R2
 
-## 2. Start the Server
+Free web services can sleep when idle. Expect a cold-start delay after inactivity. Provider upload-size limits may also apply.
 
-From repository root:
+## Create the services
 
-```bash
-docker compose up -d --build server
-docker compose ps
-docker compose logs --tail 50 server
+### Neon
+
+1. Create a Neon project and database.
+2. Copy the pooled connection string.
+3. Set `NEON_DATABASE_URL` to that value and `DB_SSL=true`.
+
+### Backblaze B2
+
+1. Create a private bucket.
+2. Create an application key restricted to the bucket with read/write access.
+3. Record the key ID, application key, bucket name, and S3 endpoint.
+4. Use the endpoint shown for the bucket region, such as `https://s3.us-west-004.backblazeb2.com`.
+
+Set:
+
+```text
+S3_BUCKET=YOUR_B2_BUCKET
+S3_ACCESS_KEY_ID=YOUR_B2_KEY_ID
+S3_SECRET_ACCESS_KEY=YOUR_B2_APPLICATION_KEY
+S3_REGION=YOUR_B2_REGION
+S3_ENDPOINT=https://s3.YOUR_B2_REGION.backblazeb2.com
+S3_FORCE_PATH_STYLE=false
 ```
 
-## 3. Local/LAN Test
+### Cloudflare R2 alternative
 
-From the same machine:
+Create an R2 bucket and an API token with object read/write permissions. Use:
 
-```bash
-docker compose run --rm client list --host server --port 4000 --token <AUTH_TOKEN>
+```text
+S3_BUCKET=YOUR_R2_BUCKET
+S3_ACCESS_KEY_ID=YOUR_R2_ACCESS_KEY_ID
+S3_SECRET_ACCESS_KEY=YOUR_R2_SECRET_ACCESS_KEY
+S3_REGION=auto
+S3_ENDPOINT=https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com
+S3_FORCE_PATH_STYLE=false
 ```
 
-From another device on the same LAN, use host private IP (example `192.168.1.2`).
+R2 activation can ask for a payment method, depending on the account.
 
-## 4. Remote Access Options
+## Deploy on Koyeb
 
-### Option A: Public Port Forwarding
+1. Create an App and choose Docker or GitHub deployment.
+2. Select this repository and set the Dockerfile path to `server/Dockerfile`.
+3. Add the environment variables from the `.env.example` file, replacing all placeholders.
+4. Expose the HTTP service port. Koyeb supplies `PORT`, so do not hard-code it.
+5. Set the health check path to `/health` using HTTP.
+6. Deploy and verify `https://YOUR-APP.koyeb.app/health` returns `{"ok":true}`.
 
-Use this only if ISP provides public IPv4 (no CGNAT).
+## Deploy on Render
 
-- Forward TCP `4000` from router to host `192.168.1.2:4000`
-- Add Windows/Linux firewall allow rule for TCP `4000`
+1. Create a new Web Service from this repository.
+2. Choose Docker and set the Dockerfile path to `server/Dockerfile` if Render asks for it.
+3. Add the same database, auth, and S3 environment variables.
+4. Set the health check path to `/health`.
+5. Deploy and verify the generated HTTPS URL.
 
-### Option B: Tailscale (Recommended)
+## Use the deployed API
 
-Works even under CGNAT.
-
-1. Install Tailscale on server host and sign in.
-2. Install Tailscale on each client and sign in.
-3. Find server Tailscale IP (example `100.89.208.126`).
-4. Use that IP in client commands:
-
-```bash
-docker compose run --rm client list --host 100.89.208.126 --port 4000 --token <AUTH_TOKEN>
-```
-
-## 5. Android Phone Client (Termux)
+Install the client locally:
 
 ```bash
-pkg update -y
-pkg upgrade -y
-pkg install -y python git
-git clone <YOUR_REPO_URL>
-cd Neoshell/client
-pip install -r requirements.txt
-python main.py list --host <SERVER_TAILSCALE_IP> --port 4000 --token <AUTH_TOKEN>
+pip install -r client/requirements.txt
 ```
 
-## 6. Keep It Available
-
-If server stops, client operations fail. Keep host awake and Docker running.
+Then run:
 
 ```bash
-docker compose up -d server
+python client/main.py list --url https://YOUR-APP.example.com --token YOUR_AUTH_TOKEN
+python client/main.py upload sample.txt --url https://YOUR-APP.example.com --token YOUR_AUTH_TOKEN
+python client/main.py delete sample.txt --url https://YOUR-APP.example.com --token YOUR_AUTH_TOKEN
 ```
 
-## 7. Troubleshooting
+Keep `AUTH_TOKEN` private. The `/health` endpoint intentionally remains unauthenticated for platform health checks.
 
-- `Connection refused` with `--host 127.0.0.1` from docker client container:
-  - Use `--host server` instead.
-- `Timeout` from internet:
-  - Check CGNAT/public IPv4 status with ISP.
-- Auth failures:
-  - Ensure same `AUTH_TOKEN` is used by server and client.
+## Local, LAN, and Tailscale use
+
+The same HTTP server works locally:
+
+```bash
+cp .env.example .env
+docker compose up --build -d server
+python client/main.py list --host 127.0.0.1 --port 8080 --token YOUR_AUTH_TOKEN
+```
+
+For a LAN client, use the host's private IP. For Tailscale, use the server's Tailscale IP and port `8080`. No router port forwarding is required for Tailscale.
+
+## Troubleshooting
+
+- `401 Unauthorized`: verify the Bearer token matches `AUTH_TOKEN`.
+- `/health` fails: confirm the platform is routing HTTP and that the service listens on its supplied `PORT`.
+- S3 errors: verify bucket name, region, endpoint, key permissions, and `S3_FORCE_PATH_STYLE`.
+- Upload size failures: check the platform's request body limit; the current MVP uses one HTTP POST per file.

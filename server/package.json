@@ -2,12 +2,14 @@
   "name": "personal-cloud-server",
   "version": "1.0.0",
   "private": true,
-  "description": "TCP backend for Personal Cloud File Manager",
+  "description": "HTTP backend for Personal Cloud File Manager",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.888.0",
+    "express": "^4.21.2",
     "pg": "^8.16.3"
   }
 }

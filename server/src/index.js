@@ -1,36 +1,51 @@
-const fs = require('fs');
 const path = require('path');
-const net = require('net');
 const crypto = require('crypto');
+const { Transform } = require('stream');
+const express = require('express');
 const { Pool } = require('pg');
+const {
+  S3Client,
+  HeadBucketCommand,
+  CreateBucketCommand,
+  PutObjectCommand,
+  DeleteObjectCommand,
+} = require('@aws-sdk/client-s3');
 
-const PORT = Number(process.env.PORT || 4000);
-const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(process.cwd(), 'uploads');
+const PORT = Number(process.env.PORT || 8080);
 const DATABASE_URL = process.env.NEON_DATABASE_URL;
 const AUTH_TOKEN = process.env.AUTH_TOKEN || '';
 const DB_SSL = String(process.env.DB_SSL || '').toLowerCase();
+const S3_BUCKET = process.env.S3_BUCKET;
+const S3_REGION = process.env.S3_REGION || 'us-east-1';
 
 if (!DATABASE_URL) {
   console.error('Missing NEON_DATABASE_URL in environment.');
   process.exit(1);
 }
 
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+if (!S3_BUCKET || !process.env.S3_ACCESS_KEY_ID || !process.env.S3_SECRET_ACCESS_KEY) {
+  console.error('Missing S3_BUCKET, S3_ACCESS_KEY_ID, or S3_SECRET_ACCESS_KEY in environment.');
+  process.exit(1);
+}
 
 const shouldUseSsl =
   DB_SSL === 'true' ||
   DB_SSL === '1' ||
   /sslmode=require/i.test(DATABASE_URL);
 
-const poolConfig = {
-  connectionString: DATABASE_URL,
-};
-
-if (shouldUseSsl) {
-  poolConfig.ssl = { rejectUnauthorized: false };
-}
+const poolConfig = { connectionString: DATABASE_URL };
+if (shouldUseSsl) poolConfig.ssl = { rejectUnauthorized: false };
 
 const pool = new Pool(poolConfig);
+const s3 = new S3Client({
+  region: S3_REGION,
+  endpoint: process.env.S3_ENDPOINT || undefined,
+  forcePathStyle: String(process.env.S3_FORCE_PATH_STYLE || '').toLowerCase() === 'true',
+  credentials: {
+    accessKeyId: process.env.S3_ACCESS_KEY_ID,
+    secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
+  },
+});
 
 async function initDb() {
   await pool.query(`
@@ -44,14 +59,13 @@ async function initDb() {
   `);
 }
 
-function sendJsonLine(socket, payload) {
-  socket.write(`${JSON.stringify(payload)}\n`);
-  socket.end();
-}
-
-function parseHeader(line) {
-  const [command, ...args] = line.trim().split(/\s+/);
-  return { command: (command || '').toUpperCase(), args };
+async function ensureBucket() {
+  try {
+    await s3.send(new HeadBucketCommand({ Bucket: S3_BUCKET }));
+  } catch (error) {
+    if (error.name !== 'NotFound' && error.$metadata?.httpStatusCode !== 404) throw error;
+    await s3.send(new CreateBucketCommand({ Bucket: S3_BUCKET }));
+  }
 }
 
 function sanitizeFilename(input) {
@@ -60,220 +74,118 @@ function sanitizeFilename(input) {
   return name;
 }
 
-function authorizeArgs(args) {
-  if (!AUTH_TOKEN) return { ok: true, args };
-
-  const [providedToken, ...rest] = args;
-  if (!providedToken || providedToken !== AUTH_TOKEN) {
-    return { ok: false, error: 'Unauthorized.' };
+function authMiddleware(req, res, next) {
+  if (AUTH_TOKEN && req.get('authorization') !== `Bearer ${AUTH_TOKEN}`) {
+    return res.status(401).json({ ok: false, error: 'Unauthorized.' });
   }
-
-  return { ok: true, args: rest };
+  return next();
 }
 
-async function handleList(socket) {
+function hashAndCountStream() {
+  const hash = crypto.createHash('sha256');
+  let received = 0;
+  const stream = new Transform({
+    transform(chunk, encoding, callback) {
+      received += chunk.length;
+      hash.update(chunk);
+      callback(null, chunk);
+    },
+  });
+  stream.getDigest = () => hash.digest('hex');
+  stream.getSize = () => received;
+  return stream;
+}
+
+async function handleList(req, res) {
   const result = await pool.query(
     `SELECT name, size_bytes, sha256, created_at
      FROM file_metadata
      ORDER BY created_at DESC, name ASC`
   );
-  sendJsonLine(socket, { ok: true, files: result.rows });
+  return res.json({ ok: true, files: result.rows });
 }
 
-async function handleDelete(socket, filenameArg) {
-  const filename = sanitizeFilename(filenameArg);
-  if (!filename) {
-    sendJsonLine(socket, { ok: false, error: 'Invalid filename.' });
-    return;
-  }
+async function handleDelete(req, res) {
+  const filename = sanitizeFilename(req.params.name);
+  if (!filename) return res.status(400).json({ ok: false, error: 'Invalid filename.' });
 
   const result = await pool.query(
     'DELETE FROM file_metadata WHERE name = $1 RETURNING stored_path',
     [filename]
   );
-
   if (result.rowCount === 0) {
-    sendJsonLine(socket, { ok: false, error: `File not found: ${filename}` });
-    return;
+    return res.status(404).json({ ok: false, error: `File not found: ${filename}` });
   }
 
-  const storedPath = result.rows[0].stored_path;
-  if (storedPath && fs.existsSync(storedPath)) {
-    fs.unlinkSync(storedPath);
-  }
-
-  sendJsonLine(socket, { ok: true, message: `Deleted ${filename}` });
+  await s3.send(new DeleteObjectCommand({ Bucket: S3_BUCKET, Key: result.rows[0].stored_path }));
+  return res.json({ ok: true, message: `Deleted ${filename}` });
 }
 
-function createSendHandler(socket, args, initialPayloadBuffer) {
-  if (args.length < 3) {
-    sendJsonLine(socket, { ok: false, error: 'SEND requires filename, size, and sha256.' });
-    return null;
-  }
+async function handleUpload(req, res) {
+  const filename = sanitizeFilename(req.get('x-file-name'));
+  const expectedSha = String(req.get('x-sha256') || '').toLowerCase();
+  const size = Number(req.headers['content-length']);
 
-  const filename = sanitizeFilename(args[0]);
-  const size = Number(args[1]);
-  const expectedSha = String(args[2]).toLowerCase();
-
-  if (!filename) {
-    sendJsonLine(socket, { ok: false, error: 'Invalid filename.' });
-    return null;
-  }
+  if (!filename) return res.status(400).json({ ok: false, error: 'Invalid filename.' });
   if (!Number.isInteger(size) || size < 0) {
-    sendJsonLine(socket, { ok: false, error: 'Invalid size.' });
-    return null;
+    return res.status(400).json({ ok: false, error: 'Content-Length is required and must be valid.' });
   }
   if (!/^[a-f0-9]{64}$/.test(expectedSha)) {
-    sendJsonLine(socket, { ok: false, error: 'Invalid sha256.' });
-    return null;
+    return res.status(400).json({ ok: false, error: 'Invalid sha256.' });
   }
 
-  const storedPath = path.join(UPLOAD_DIR, filename);
-  const tmpPath = `${storedPath}.part`;
-  const fileWrite = fs.createWriteStream(tmpPath);
-  const hash = crypto.createHash('sha256');
+  const body = hashAndCountStream();
+  req.pipe(body);
+  await s3.send(new PutObjectCommand({
+    Bucket: S3_BUCKET,
+    Key: filename,
+    Body: body,
+    ContentLength: size,
+  }));
 
-  let received = 0;
-  let completed = false;
-
-  const consumeChunk = async (chunk) => {
-    if (completed) return;
-
-    const remaining = size - received;
-    const toTake = Math.min(remaining, chunk.length);
-    const data = chunk.subarray(0, toTake);
-
-    if (toTake > 0) {
-      received += toTake;
-      hash.update(data);
-      if (!fileWrite.write(data)) {
-        await new Promise((resolve) => fileWrite.once('drain', resolve));
-      }
-    }
-
-    if (received === size) {
-      completed = true;
-      fileWrite.end();
-      await new Promise((resolve) => fileWrite.once('finish', resolve));
-
-      const actualSha = hash.digest('hex');
-      if (actualSha !== expectedSha) {
-        fs.unlinkSync(tmpPath);
-        sendJsonLine(socket, { ok: false, error: 'Checksum mismatch.' });
-        return;
-      }
-
-      if (fs.existsSync(storedPath)) {
-        fs.unlinkSync(storedPath);
-      }
-      fs.renameSync(tmpPath, storedPath);
-
-      await pool.query(
-        `INSERT INTO file_metadata(name, size_bytes, sha256, stored_path)
-         VALUES($1, $2, $3, $4)
-         ON CONFLICT (name)
-         DO UPDATE SET
-           size_bytes = EXCLUDED.size_bytes,
-           sha256 = EXCLUDED.sha256,
-           stored_path = EXCLUDED.stored_path,
-           created_at = NOW()`,
-        [filename, size, actualSha, storedPath]
-      );
-
-      sendJsonLine(socket, {
-        ok: true,
-        message: `Stored ${filename}`,
-        file: { name: filename, size_bytes: size, sha256: actualSha },
-      });
-    }
-  };
-
-  if (initialPayloadBuffer && initialPayloadBuffer.length > 0) {
-    consumeChunk(initialPayloadBuffer).catch((error) => {
-      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-      sendJsonLine(socket, { ok: false, error: error.message });
-    });
+  const actualSha = body.getDigest();
+  if (body.getSize() !== size || actualSha !== expectedSha) {
+    await s3.send(new DeleteObjectCommand({ Bucket: S3_BUCKET, Key: filename }));
+    return res.status(400).json({ ok: false, error: 'Checksum mismatch.' });
   }
 
-  return {
-    consumeChunk,
-    onSocketEnd: () => {
-      if (!completed) {
-        if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-        sendJsonLine(socket, { ok: false, error: 'Connection ended before upload completed.' });
-      }
-    },
-  };
+  await pool.query(
+    `INSERT INTO file_metadata(name, size_bytes, sha256, stored_path)
+     VALUES($1, $2, $3, $4)
+     ON CONFLICT (name)
+     DO UPDATE SET
+       size_bytes = EXCLUDED.size_bytes,
+       sha256 = EXCLUDED.sha256,
+       stored_path = EXCLUDED.stored_path,
+       created_at = NOW()`,
+    [filename, size, actualSha, filename]
+  );
+
+  return res.json({
+    ok: true,
+    message: `Stored ${filename}`,
+    file: { name: filename, size_bytes: size, sha256: actualSha },
+  });
 }
 
 async function startServer() {
   await initDb();
+  await ensureBucket();
 
-  const server = net.createServer((socket) => {
-    let headerDone = false;
-    let lineBuffer = Buffer.alloc(0);
-    let sendState = null;
-
-    socket.on('data', (chunk) => {
-      (async () => {
-        if (sendState) {
-          await sendState.consumeChunk(chunk);
-          return;
-        }
-
-        if (!headerDone) {
-          lineBuffer = Buffer.concat([lineBuffer, chunk]);
-          const newlineIndex = lineBuffer.indexOf(0x0a);
-          if (newlineIndex === -1) {
-            if (lineBuffer.length > 4096) {
-              sendJsonLine(socket, { ok: false, error: 'Header too large.' });
-            }
-            return;
-          }
-
-          headerDone = true;
-          const header = lineBuffer.subarray(0, newlineIndex).toString('utf8');
-          const rest = lineBuffer.subarray(newlineIndex + 1);
-          const { command, args } = parseHeader(header);
-          const auth = authorizeArgs(args);
-
-          if (!auth.ok) {
-            sendJsonLine(socket, { ok: false, error: auth.error });
-            return;
-          }
-
-          try {
-            if (command === 'LIST') {
-              await handleList(socket);
-            } else if (command === 'DELETE') {
-              await handleDelete(socket, auth.args[0]);
-            } else if (command === 'SEND') {
-              sendState = createSendHandler(socket, auth.args, rest);
-            } else {
-              sendJsonLine(socket, { ok: false, error: `Unknown command: ${command}` });
-            }
-          } catch (error) {
-            sendJsonLine(socket, { ok: false, error: error.message });
-          }
-        }
-      })().catch((error) => {
-        sendJsonLine(socket, { ok: false, error: error.message });
-      });
-    });
-
-    socket.on('end', () => {
-      if (sendState) {
-        sendState.onSocketEnd();
-      }
-    });
-
-    socket.on('error', () => {
-      socket.destroy();
-    });
+  const app = express();
+  app.get('/health', (req, res) => res.json({ ok: true }));
+  app.use('/api', authMiddleware);
+  app.get('/api/files', handleList);
+  app.post('/api/files', handleUpload);
+  app.delete('/api/files/:name', handleDelete);
+  app.use((error, req, res, next) => {
+    console.error(error);
+    if (res.headersSent) return next(error);
+    return res.status(500).json({ ok: false, error: error.message });
   });
 
-  server.listen(PORT, '0.0.0.0', () => {
-    console.log(`TCP server listening on port ${PORT}`);
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`HTTP server listening on port ${PORT}`);
   });
 }
 

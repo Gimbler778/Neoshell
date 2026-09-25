@@ -1,13 +1,4 @@
 services:
-  init-permissions:
-    image: alpine:3.20
-    user: "0:0"
-    command: ["sh", "-c", "mkdir -p /app/uploads && chown -R 65532:65532 /app/uploads"]
-    volumes:
-      - cloud_data:/app/uploads
-    networks:
-      - cloud_net
-
   server:
     build:
       context: ./server
@@ -16,22 +7,23 @@ services:
     env_file:
       - .env
     environment:
-      - PORT=${SERVER_PORT:-4000}
-      - UPLOAD_DIR=/app/uploads
+      - PORT=${SERVER_PORT:-8080}
       - AUTH_TOKEN=${AUTH_TOKEN:-}
       - DB_SSL=${DB_SSL:-true}
+      - S3_BUCKET=${S3_BUCKET}
+      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID}
+      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY}
+      - S3_REGION=${S3_REGION}
+      - S3_ENDPOINT=${S3_ENDPOINT}
+      - S3_FORCE_PATH_STYLE=${S3_FORCE_PATH_STYLE:-false}
     ports:
-      - "${SERVER_PORT:-4000}:${SERVER_PORT:-4000}"
-    volumes:
-      - cloud_data:/app/uploads
+      - "${SERVER_PORT:-8080}:${SERVER_PORT:-8080}"
     healthcheck:
-      test: ["CMD", "node", "-e", "const net=require('net');const port=Number(process.env.PORT||4000);const socket=net.connect({host:'127.0.0.1',port},()=>{socket.end();process.exit(0)});socket.on('error',()=>process.exit(1));setTimeout(()=>process.exit(1),2000);"]
+      test: ["CMD", "/nodejs/bin/node", "-e", "require('http').get('http://127.0.0.1:'+(process.env.PORT||8080)+'/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 10s
-    depends_on:
-      - init-permissions
     networks:
       - cloud_net
 
@@ -41,8 +33,7 @@ services:
     env_file:
       - .env
     environment:
-      - SERVER_HOST=server
-      - SERVER_PORT=${SERVER_PORT:-4000}
+      - SERVER_URL=http://server:${SERVER_PORT:-8080}
       - AUTH_TOKEN=${AUTH_TOKEN:-}
     depends_on:
       - server
@@ -53,6 +44,3 @@ services:
 
 networks:
   cloud_net:
-
-volumes:
-  cloud_data:
