@@ -17,10 +17,12 @@ All `/api` endpoints accept `Authorization: Bearer <AUTH_TOKEN>` when `AUTH_TOKE
 
 - `GET /health` -> `{"ok":true}`
 - `GET /api/files` -> list metadata
+- `GET /api/files/:name` -> stream file bytes with SHA-256 header
 - `POST /api/files` -> raw binary body with `X-File-Name`, `X-SHA256`, and `Content-Length`
+- `POST /api/files/:name/share` -> generate temporary presigned S3/B2 download URL (`{"expires_in": 3600}`)
 - `DELETE /api/files/:name` -> delete metadata and the S3 object
 
-Filenames are reduced to their basename. Uploads are streamed to object storage and are recorded in PostgreSQL only after the received byte count and SHA-256 match the request headers.
+Filenames are reduced to their basename. Uploads are streamed to object storage and recorded in PostgreSQL only after received byte count and SHA-256 match. Downloads stream to a temporary `.part` file, verify checksum, and rename atomically.
 
 ## Prerequisites
 
@@ -46,48 +48,82 @@ Check the API:
 curl http://localhost:8080/health
 ```
 
-Use the CLI:
+## Quick Start
+
+### 1. Install the CLI
+
+Install once with `pipx` (recommended) or `pip`:
 
 ```bash
-docker compose run --rm -v "${PWD}/sample.txt:/app/sample.txt" client upload sample.txt
-docker compose run --rm client list
-docker compose run --rm client delete sample.txt
+pipx install neoshell-cli
+# or: pip install neoshell-cli
 ```
 
-## CLI Configuration
-
-For a deployed service:
+### 2. Configure & Connect
 
 ```bash
-pip install -r client/requirements.txt
-python client/main.py list --url https://YOUR-APP.example.com --token YOUR_AUTH_TOKEN
-python client/main.py upload sample.txt --url https://YOUR-APP.example.com --token YOUR_AUTH_TOKEN
+neoshell login --url https://YOUR-APP.koyeb.app --token YOUR_AUTH_TOKEN
 ```
 
-For local/LAN use, `--host` and `--port` remain available and default to `127.0.0.1:8080`. `SERVER_URL` can also be used instead of `--url`.
-
-## Free Cloud Deployment
-
-The recommended no-card MVP stack is Koyeb or Render for the Docker web service, Backblaze B2 for S3-compatible storage, and Neon for PostgreSQL. Cloudflare R2 is also supported, but account activation may request a payment method.
-
-1. Create a Neon project and copy its pooled connection string into `NEON_DATABASE_URL`. Set `DB_SSL=true`.
-2. Create a private Backblaze B2 bucket, an application key restricted to that bucket, and note the S3 endpoint, for example `https://s3.us-west-004.backblazeb2.com`.
-3. Deploy this repository as a Docker web service. The service must use the `server/Dockerfile`; the platform supplies `PORT`.
-4. Add these environment variables to the service: `NEON_DATABASE_URL`, `DB_SSL`, `AUTH_TOKEN`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_REGION`, `S3_ENDPOINT`, and `S3_FORCE_PATH_STYLE=false`.
-5. Configure the health check as `GET /health`. Do not set a fixed cloud `PORT`; let the platform provide it.
-6. Verify `https://YOUR-APP.example.com/health`, then use that URL with the CLI.
-
-For Cloudflare R2, use the account S3 endpoint `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`, an R2 API token, the bucket name, `S3_REGION=auto`, and `S3_FORCE_PATH_STYLE=false`.
-
-Free web services may sleep after inactivity, so the first request can have a cold-start delay. Large uploads may also be limited by the platform's HTTP body-size limit; chunked uploads can be added later if needed.
-
-## LAN and Tailscale
-
-The API is ordinary HTTP, so local access still works over LAN or Tailscale:
+### 3. File Operations
 
 ```bash
-python client/main.py list --host 192.168.1.2 --port 8080 --token YOUR_AUTH_TOKEN
-python client/main.py list --url http://100.x.y.z:8080 --token YOUR_AUTH_TOKEN
+# Upload files
+neoshell upload ./photo.zip ./notes.txt
+
+# List stored files
+neoshell list
+
+# Download a file with automatic SHA-256 integrity check
+neoshell download photo.zip
+
+# Create a temporary shareable link (e.g. 24h, 1h, 7d)
+neoshell share photo.zip --expires 24h
+
+# Delete a file
+neoshell delete photo.zip --yes
+
+# Check status
+neoshell status
+```
+
+For complete CLI documentation and flags, see [docs/CLI.md](docs/CLI.md).
+
+## Local Development & Docker
+
+Run the server locally with Docker:
+
+```bash
+cp .env.example .env
+docker compose up --build -d server
+curl http://localhost:8080/health
+```
+
+Use the CLI against local server:
+
+```bash
+# Using installed package
+neoshell login --url http://127.0.0.1:8080 --token "$AUTH_TOKEN"
+neoshell upload sample.txt
+
+# Or run from repo in development
+pip install -e ./client
+python -m neoshell list
+```
+
+## Public Access & Sharing
+ 
+To share access with collaborators without deploying to cloud VMs, expose your local Docker container with a free Cloudflare tunnel:
+ 
+```bash
+npx -y cloudflared tunnel --url http://localhost:8080
+```
+ 
+Cloudflare generates an instant public HTTPS URL (e.g. `https://your-name.trycloudflare.com`). Collaborators can then log in from any machine:
+ 
+```bash
+neoshell login --url https://your-name.trycloudflare.com --token YOUR_AUTH_TOKEN
+neoshell list
 ```
 
 ## Smoke Test

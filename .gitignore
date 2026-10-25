@@ -27,7 +27,11 @@ pnpm-debug.log*
 
 # Build / runtime artifacts
 dist/
+**/dist/
 build/
+**/build/
+*.egg-info/
+**/*.egg-info/
 tmp/
 temp/
 uploads/

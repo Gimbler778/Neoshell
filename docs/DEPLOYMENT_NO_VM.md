@@ -71,33 +71,43 @@ R2 activation can ask for a payment method, depending on the account.
 
 ## Use the deployed API
 
-Install the client locally:
+Install the CLI package locally:
 
 ```bash
-pip install -r client/requirements.txt
+pipx install neoshell-cli
+# or: pip install neoshell-cli
 ```
 
-Then run:
+Authenticate once:
 
 ```bash
-python client/main.py list --url https://YOUR-APP.example.com --token YOUR_AUTH_TOKEN
-python client/main.py upload sample.txt --url https://YOUR-APP.example.com --token YOUR_AUTH_TOKEN
-python client/main.py delete sample.txt --url https://YOUR-APP.example.com --token YOUR_AUTH_TOKEN
+neoshell login --url https://YOUR-APP.example.com --token YOUR_AUTH_TOKEN
+```
+
+Then run commands directly without specifying `--url` or `--token` every time:
+
+```bash
+neoshell list
+neoshell upload sample.txt
+neoshell download sample.txt
+neoshell share sample.txt --expires 24h
+neoshell delete sample.txt --yes
+neoshell status
 ```
 
 Keep `AUTH_TOKEN` private. The `/health` endpoint intentionally remains unauthenticated for platform health checks.
 
 ## Local, LAN, and Tailscale use
 
-The same HTTP server works locally:
+The same HTTP server works locally or across LAN / Tailscale:
 
 ```bash
-cp .env.example .env
-docker compose up --build -d server
-python client/main.py list --host 127.0.0.1 --port 8080 --token YOUR_AUTH_TOKEN
-```
+# Point CLI to local instance
+neoshell login --url http://127.0.0.1:8080 --token YOUR_AUTH_TOKEN
 
-For a LAN client, use the host's private IP. For Tailscale, use the server's Tailscale IP and port `8080`. No router port forwarding is required for Tailscale.
+# Or for LAN / Tailscale:
+neoshell login --url http://100.x.y.z:8080 --token YOUR_AUTH_TOKEN
+```
 
 ## Troubleshooting
 

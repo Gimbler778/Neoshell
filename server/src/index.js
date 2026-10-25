@@ -8,8 +8,11 @@ const {
   HeadBucketCommand,
   CreateBucketCommand,
   PutObjectCommand,
+  GetObjectCommand,
   DeleteObjectCommand,
 } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+
 
 const PORT = Number(process.env.PORT || 8080);
 const DATABASE_URL = process.env.NEON_DATABASE_URL;
@@ -168,6 +171,76 @@ async function handleUpload(req, res) {
   });
 }
 
+async function handleDownload(req, res) {
+  const filename = sanitizeFilename(req.params.name);
+  if (!filename) return res.status(400).json({ ok: false, error: 'Invalid filename.' });
+
+  const result = await pool.query(
+    'SELECT name, size_bytes, sha256, stored_path FROM file_metadata WHERE name = $1',
+    [filename]
+  );
+  if (result.rowCount === 0) {
+    return res.status(404).json({ ok: false, error: `File not found: ${filename}` });
+  }
+
+  const file = result.rows[0];
+  try {
+    const s3Response = await s3.send(
+      new GetObjectCommand({
+        Bucket: S3_BUCKET,
+        Key: file.stored_path,
+      })
+    );
+
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Length', file.size_bytes);
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.name)}"`);
+    res.setHeader('X-SHA256', file.sha256);
+
+    s3Response.Body.pipe(res);
+  } catch (error) {
+    if (error.name === 'NoSuchKey' || error.$metadata?.httpStatusCode === 404) {
+      return res.status(404).json({ ok: false, error: `File not found in storage: ${filename}` });
+    }
+    throw error;
+  }
+}
+
+async function handleShare(req, res) {
+  const filename = sanitizeFilename(req.params.name);
+  if (!filename) return res.status(400).json({ ok: false, error: 'Invalid filename.' });
+
+  let expiresIn = Number(req.body?.expires_in);
+  if (isNaN(expiresIn) || expiresIn <= 0) {
+    expiresIn = 86400; // default 24h
+  }
+  // Clamp to 60 seconds through 7 days (604800s)
+  expiresIn = Math.max(60, Math.min(604800, Math.floor(expiresIn)));
+
+  const result = await pool.query(
+    'SELECT name, stored_path FROM file_metadata WHERE name = $1',
+    [filename]
+  );
+  if (result.rowCount === 0) {
+    return res.status(404).json({ ok: false, error: `File not found: ${filename}` });
+  }
+
+  const file = result.rows[0];
+  const command = new GetObjectCommand({
+    Bucket: S3_BUCKET,
+    Key: file.stored_path,
+  });
+
+  const presignedUrl = await getSignedUrl(s3, command, { expiresIn });
+  const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
+
+  return res.json({
+    ok: true,
+    url: presignedUrl,
+    expires_at: expiresAt,
+  });
+}
+
 async function startServer() {
   await initDb();
   await ensureBucket();
@@ -176,7 +249,9 @@ async function startServer() {
   app.get('/health', (req, res) => res.json({ ok: true }));
   app.use('/api', authMiddleware);
   app.get('/api/files', handleList);
+  app.get('/api/files/:name', handleDownload);
   app.post('/api/files', handleUpload);
+  app.post('/api/files/:name/share', express.json(), handleShare);
   app.delete('/api/files/:name', handleDelete);
   app.use((error, req, res, next) => {
     console.error(error);

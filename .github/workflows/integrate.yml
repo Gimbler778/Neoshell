@@ -8,20 +8,35 @@ on:
 
 jobs:
   python-client:
-    runs-on: ubuntu-latest
+    name: client (py${{ matrix.python-version }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.9", "3.12"]
     steps:
     - uses: actions/checkout@v4
-    - name: Set up Python
+    - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v5
       with:
-        python-version: "3.12"
-    - name: Install dependencies
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies and package in editable mode
       run: |
-        python -m pip install --upgrade pip
-        pip install -r client/requirements.txt
-    - name: Syntax check Python CLI
+        python -m pip install --upgrade pip build
+        pip install ./client[dev]
+    - name: Run unit and CLI tests
       run: |
-        python -m py_compile client/main.py
+        pytest tests -v
+    - name: Build distribution packages (wheel and sdist)
+      run: |
+        python -m build client
+    - name: Test CLI entry point
+      run: |
+        neoshell --version
+        neoshell --help
+        python -m neoshell --help
+        python client/main.py --help
 
   node-server:
     runs-on: ubuntu-latest
@@ -89,8 +104,10 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: "20"
-    - name: Install Python dependencies
-      run: python -m pip install -r client/requirements.txt
+    - name: Install CLI package
+      run: |
+        python -m pip install --upgrade pip
+        pip install ./client
     - name: Install server dependencies
       run: |
         cd server
@@ -118,9 +135,19 @@ jobs:
         else:
             raise SystemExit("Server did not start in time")
         PY
-    - name: Run smoke test
+    - name: Run automated smoke test
       run: |
         python scripts/smoke_test.py
+    - name: Run CLI end-to-end commands
+      run: |
+        neoshell login --url http://127.0.0.1:8080 --token ci-smoke-token
+        neoshell status
+        neoshell upload sample.txt
+        neoshell list
+        neoshell download sample.txt -o /tmp/sample_downloaded.txt
+        diff sample.txt /tmp/sample_downloaded.txt
+        neoshell share sample.txt --expires 1h
+        neoshell delete sample.txt --yes
     - name: Show server log on failure
       if: failure()
       run: |
