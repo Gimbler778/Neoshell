@@ -70,18 +70,6 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-      minio:
-        image: minio/minio:latest
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        ports:
-          - 9000:9000
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     env:
       SERVER_URL: http://127.0.0.1:8080
       SERVER_PORT: "8080"
@@ -96,6 +84,29 @@ jobs:
       S3_FORCE_PATH_STYLE: "true"
     steps:
     - uses: actions/checkout@v4
+    - name: Start MinIO service
+      run: |
+        docker run -d --name minio \
+          -p 9000:9000 \
+          -e MINIO_ROOT_USER=minioadmin \
+          -e MINIO_ROOT_PASSWORD=minioadmin \
+          quay.io/minio/minio server /data
+    - name: Wait for MinIO
+      run: |
+        python - <<'PY'
+        import time, urllib.request
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:9000/minio/health/live", timeout=1) as resp:
+                    if resp.status == 200:
+                        print("minio-ready")
+                        break
+            except Exception:
+                time.sleep(0.5)
+        else:
+            raise SystemExit("MinIO did not start in time")
+        PY
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
@@ -151,8 +162,8 @@ jobs:
     - name: Show server log on failure
       if: failure()
       run: |
-        cat server.log
+        test -f server.log && cat server.log || true
     - name: Stop server
       if: always()
       run: |
-        kill "$(cat server.pid)" || true
+        test -f server.pid && kill "$(cat server.pid)" || true
