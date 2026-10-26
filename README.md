@@ -59,6 +59,17 @@ pipx install neoshell-cli
 # or: pip install neoshell-cli
 ```
 
+If PyPI has not refreshed yet, or reports `No matching distribution found`,
+install the current repository version while developing:
+
+```bash
+pip install ./client
+```
+
+The package is published from the `release.yml` workflow. New releases are
+created by updating the version in `client/pyproject.toml` and pushing a
+matching version tag.
+
 ### 2. Configure & Connect
 
 ```bash

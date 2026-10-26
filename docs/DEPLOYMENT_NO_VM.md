@@ -71,11 +71,20 @@ R2 activation can ask for a payment method, depending on the account.
 
 ## Use the deployed API
 
-Install the CLI package locally:
+Install the published CLI package locally:
 
 ```bash
 pipx install neoshell-cli
 # or: pip install neoshell-cli
+```
+
+If a new release has not appeared on PyPI yet, install it directly from a
+checkout of this repository instead:
+
+```bash
+git clone https://github.com/Gimbler778/Neoshell.git
+cd Neoshell
+pip install ./client
 ```
 
 Authenticate once:

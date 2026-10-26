@@ -6,6 +6,11 @@ The Neoshell CLI (`neoshell-cli` package) provides a modern terminal interface t
 
 ## Installation
 
+> **PyPI status:** `neoshell-cli` is published on PyPI. If `pip` says
+> `No matching distribution found` immediately after a release, retry after
+> PyPI's index has refreshed or install from the repository with
+> `pip install ./client`.
+
 ### Recommended: `pipx` (isolated tool environment)
 
 ```bash
